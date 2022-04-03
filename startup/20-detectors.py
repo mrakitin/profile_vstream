@@ -1,4 +1,5 @@
 import datetime
+import logging
 import time as ttime
 from collections import deque
 from pathlib import Path
@@ -11,6 +12,8 @@ from event_model import compose_resource
 from ophyd import Component as Cpt
 from ophyd import Device, Signal
 from ophyd.sim import NullStatus, new_uid
+
+logger = logging.getLogger("vstream")
 
 
 class ExternalFileReference(Signal):
@@ -52,7 +55,6 @@ class VideoStreamDet(Device):
         self._datum_factory = None
 
     def trigger(self, *args, **kwargs):
-        print("!!! trigger method")
         super().trigger(*args, **kwargs)
 
         date = datetime.datetime.now()
@@ -82,16 +84,14 @@ class VideoStreamDet(Device):
         i = 0
         cap = cv2.VideoCapture(self._video_stream_url)
         while True:
-            print(f"{datetime.datetime.now().strftime('%F %T.%f')} Iteration: {i}")
+            logger.debug(f"Iteration: {i}")
             i += 1
             ret, frame = cap.read()
             frames.append(frame)
             times.append(ttime.time())
 
             # cv2.imshow('Video', frame)
-            print(
-                f"{datetime.datetime.now().strftime('%F %T.%f')} Shape: {frame.shape}"
-            )
+            logger.debug(f"shape: {frame.shape}")
 
             if ttime.monotonic() - start >= self.exposure_period.get():
                 break
@@ -100,10 +100,14 @@ class VideoStreamDet(Device):
                 exit(0)
 
         frames = np.array(frames)
+        logger.debug(f"original shape: {frames.shape}")
+        # Averaging over all frames and summing 3 RGB channels
+        averaged = frames.mean(axis=0).sum(axis=-1)
 
         with h5py.File(data_file, "w") as f:
             group = f.create_group("/entry")
-            group.create_dataset("data", data=frames, compression="lzf")
+            group.create_dataset("frames", data=frames, compression="lzf")
+            group.create_dataset("averaged", data=averaged, compression="lzf")
 
         datum_document = self._datum_factory(datum_kwargs={})
         self._asset_docs_cache.append(("datum", datum_document))
@@ -116,18 +120,15 @@ class VideoStreamDet(Device):
         return NullStatus()
 
     def describe(self):
-        print("!!! describe method")
         res = super().describe()
-        res[self.image.name].update(dict(shape=[-1, 480, 704, 3]))
+        res[self.image.name].update(dict(shape=[480, 704]))
         return res
 
     def unstage(self):
-        print("!!! unstage method")
         super().unstage()
         self._resource_document = None
 
     def collect_asset_docs(self):
-        print("!!! collect_asset_docs method")
         items = list(self._asset_docs_cache)
         self._asset_docs_cache.clear()
         for item in items:
@@ -148,8 +149,16 @@ class VideoStreamHDF5Handler(HandlerBase):
 
     def __call__(self):
         with h5py.File(self._name, "r") as f:
-            entry = f["/entry/data"]
+            entry = f["/entry/averaged"]
             return entry[:]
 
 
 db.reg.register_handler("VIDEO_STREAM_HDF5", VideoStreamHDF5Handler, overwrite=True)
+
+# Logger config:
+# handler = logging.StreamHandler()
+# formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+# handler.setFormatter(formatter)
+# logger.addHandler(handler)
+# logger.setLevel(logging.DEBUG)
+# handler.setLevel(logging.DEBUG)
